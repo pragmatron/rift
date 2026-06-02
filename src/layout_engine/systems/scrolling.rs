@@ -1037,10 +1037,17 @@ impl LayoutSystem for ScrollingLayoutSystem {
         } else {
             state.align_scroll_to_selected();
         }
-        let raise = state
-            .selected_location()
-            .map(|(col_idx, _)| state.columns[col_idx].windows.clone())
-            .unwrap_or_default();
+        let raise = if niri_navigation {
+            // In niri mode focus is a single row. Rows in the selected column do not
+            // overlap, and raising same-app siblings can make terminals keep keyboard
+            // focus on the wrong OS window even though Rift selected the right row.
+            new_sel.into_iter().collect()
+        } else {
+            state
+                .selected_location()
+                .map(|(col_idx, _)| state.columns[col_idx].windows.clone())
+                .unwrap_or_default()
+        };
         (new_sel, raise)
     }
 
@@ -2067,6 +2074,28 @@ mod tests {
 
         let state = system.layouts.get(layout).expect("layout state missing");
         assert_eq!(state.selected, Some(w2));
+    }
+
+    #[test]
+    fn niri_focus_only_raises_target_window() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        let (mut system, layout, w1, w2, w3) = setup_three_windows(settings);
+        assert!(system.select_window(layout, w2));
+        system.join_selection_with_direction(layout, Direction::Left);
+
+        let (focus_up, raise_up) = system.move_focus(layout, Direction::Up);
+        assert_eq!(focus_up, Some(w1));
+        assert_eq!(raise_up, vec![w1]);
+
+        let (focus_right, raise_right) = system.move_focus(layout, Direction::Right);
+        assert_eq!(focus_right, Some(w3));
+        assert_eq!(raise_right, vec![w3]);
+
+        let (focus_left, raise_left) = system.move_focus(layout, Direction::Left);
+        assert_eq!(focus_left, Some(w1));
+        assert_eq!(raise_left, vec![w1]);
     }
 
     #[test]
