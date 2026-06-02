@@ -17,12 +17,42 @@ struct Column {
     width_offset: f64,
     #[serde(default)]
     height_weights: Vec<f64>,
+    #[serde(skip)]
+    last_focused: Option<WindowId>,
 }
 
 impl Column {
+    fn new(wid: WindowId) -> Self { Self::with_height_weight(wid, 1.0) }
+
+    fn with_height_weight(wid: WindowId, height_weight: f64) -> Self {
+        Self {
+            windows: vec![wid],
+            width_offset: 0.0,
+            height_weights: vec![height_weight],
+            last_focused: Some(wid),
+        }
+    }
+
     fn ensure_height_weights(&mut self) {
         if self.height_weights.len() != self.windows.len() {
             self.height_weights.resize(self.windows.len(), 1.0);
+        }
+    }
+
+    fn last_focused_window(&self) -> Option<WindowId> {
+        self.last_focused.filter(|wid| self.windows.contains(wid))
+    }
+
+    fn focus_candidate(&self, row_idx: usize, prefer_last_focused: bool) -> Option<WindowId> {
+        if prefer_last_focused && let Some(wid) = self.last_focused_window() {
+            return Some(wid);
+        }
+        self.windows.get(row_idx.min(self.windows.len().saturating_sub(1))).copied()
+    }
+
+    fn remember_focus(&mut self, wid: WindowId) {
+        if self.windows.contains(&wid) {
+            self.last_focused = Some(wid);
         }
     }
 }
@@ -173,6 +203,14 @@ impl LayoutState {
         self.pending_align.store(false, Ordering::Relaxed);
     }
 
+    fn remember_selected_column_focus(&mut self) {
+        let Some(selected) = self.selected else { return };
+        let Some((col_idx, _)) = self.locate(selected) else {
+            return;
+        };
+        self.columns[col_idx].remember_focus(selected);
+    }
+
     fn remove_window(&mut self, wid: WindowId) -> Option<WindowId> {
         let (col_idx, row_idx) = self.locate(wid)?;
         let col = &mut self.columns[col_idx];
@@ -203,6 +241,7 @@ impl LayoutState {
             if self.selected.is_none() {
                 self.selected = self.first_window();
             }
+            self.remember_selected_column_focus();
         }
         if self.center_override_window == Some(wid) {
             self.center_override_window = None;
@@ -213,11 +252,7 @@ impl LayoutState {
     }
 
     fn insert_column_after(&mut self, index: usize, wid: WindowId) {
-        let column = Column {
-            windows: vec![wid],
-            width_offset: 0.0,
-            height_weights: vec![1.0],
-        };
+        let column = Column::new(wid);
         let insert_at = (index + 1).min(self.columns.len());
         self.columns.insert(insert_at, column);
         self.selected = Some(wid);
@@ -225,11 +260,7 @@ impl LayoutState {
     }
 
     fn insert_column_at_end(&mut self, wid: WindowId) {
-        self.columns.push(Column {
-            windows: vec![wid],
-            width_offset: 0.0,
-            height_weights: vec![1.0],
-        });
+        self.columns.push(Column::new(wid));
         self.selected = Some(wid);
         self.align_scroll_to_selected();
     }
@@ -265,17 +296,14 @@ impl LayoutState {
             }
             target = target.min(self.columns.len());
             if target >= self.columns.len() {
-                self.columns.push(Column {
-                    windows: vec![window],
-                    width_offset: 0.0,
-                    height_weights: vec![1.0],
-                });
+                self.columns.push(Column::new(window));
             } else {
                 self.columns[target].ensure_height_weights();
                 self.columns[target].windows.push(window);
                 self.columns[target].height_weights.push(weight);
             }
             self.selected = Some(window);
+            self.remember_selected_column_focus();
             self.align_scroll_to_selected();
         }
     }
@@ -514,23 +542,24 @@ impl ScrollingLayoutSystem {
         };
         let new_sel = column.windows[new_idx];
         state.selected = Some(new_sel);
+        state.columns[col_idx].remember_focus(new_sel);
         Some(new_sel)
     }
 
-    fn move_focus_horizontal(state: &mut LayoutState, dir: Direction) -> Option<WindowId> {
+    fn move_focus_horizontal(
+        state: &mut LayoutState,
+        dir: Direction,
+        prefer_last_focused: bool,
+    ) -> Option<WindowId> {
         let (col_idx, row_idx) = state.selected_location()?;
         let target_col = match dir {
             Direction::Left => col_idx.checked_sub(1)?,
             Direction::Right => (col_idx + 1 < state.columns.len()).then_some(col_idx + 1)?,
             _ => return None,
         };
-        let target_column = &state.columns[target_col];
-        if target_column.windows.is_empty() {
-            return None;
-        }
-        let target_row = row_idx.min(target_column.windows.len() - 1);
-        let new_sel = target_column.windows[target_row];
+        let new_sel = state.columns[target_col].focus_candidate(row_idx, prefer_last_focused)?;
         state.selected = Some(new_sel);
+        state.columns[target_col].remember_focus(new_sel);
         Some(new_sel)
     }
 
@@ -549,7 +578,9 @@ impl ScrollingLayoutSystem {
         column.ensure_height_weights();
         column.windows.swap(row_idx, target_idx);
         column.height_weights.swap(row_idx, target_idx);
-        state.selected = Some(column.windows[target_idx]);
+        let selected = column.windows[target_idx];
+        state.selected = Some(selected);
+        column.remember_focus(selected);
         true
     }
 
@@ -569,11 +600,7 @@ impl ScrollingLayoutSystem {
                 Direction::Right => (col_idx + 1).min(state.columns.len()),
                 _ => return false,
             };
-            state.columns.insert(insert_at, Column {
-                windows: vec![wid],
-                width_offset: 0.0,
-                height_weights: vec![weight],
-            });
+            state.columns.insert(insert_at, Column::with_height_weight(wid, weight));
             state.selected = Some(wid);
             return true;
         }
@@ -994,7 +1021,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
             return (None, vec![]);
         };
         let new_sel = match direction {
-            Direction::Left | Direction::Right => Self::move_focus_horizontal(state, direction),
+            Direction::Left | Direction::Right => {
+                Self::move_focus_horizontal(state, direction, niri_navigation)
+            }
             Direction::Up | Direction::Down => Self::move_focus_vertical(state, direction),
         };
         if new_sel.is_some() && niri_navigation {
@@ -1164,9 +1193,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
             // Refocusing a window that is already selected should not replace a
             // pending niri reveal or transfer a center override to that window.
             if niri_navigation && state.selected == Some(wid) {
+                state.remember_selected_column_focus();
                 return true;
             }
             state.selected = Some(wid);
+            state.remember_selected_column_focus();
             if niri_navigation {
                 state.reveal_selected_without_direction();
             } else {
@@ -1478,13 +1509,12 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
         state.columns[col_idx].windows = remaining;
         state.columns[col_idx].height_weights = remaining_weights;
+        state.columns[col_idx].remember_focus(selected);
         let mut insert_at = col_idx + 1;
         for (idx, wid) in moved.iter().copied().enumerate() {
-            state.columns.insert(insert_at, Column {
-                windows: vec![wid],
-                width_offset: 0.0,
-                height_weights: vec![moved_weights[idx]],
-            });
+            state
+                .columns
+                .insert(insert_at, Column::with_height_weight(wid, moved_weights[idx]));
             insert_at += 1;
         }
         moved
@@ -1519,11 +1549,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let wid = state.columns[col_idx].windows.remove(row_idx);
         let weight = state.columns[col_idx].height_weights.remove(row_idx);
         let insert_at = (col_idx + 1).min(state.columns.len());
-        state.columns.insert(insert_at, Column {
-            windows: vec![wid],
-            width_offset: 0.0,
-            height_weights: vec![weight],
-        });
+        state.columns.insert(insert_at, Column::with_height_weight(wid, weight));
         state.selected = Some(wid);
         if niri_navigation {
             state.reveal_selected_without_direction();
@@ -1693,6 +1719,7 @@ mod tests {
             windows: vec![w1, w2],
             width_offset: 0.0,
             height_weights: vec![1.0, 1.0],
+            last_focused: Some(w1),
         }];
         state.selected = Some(w1);
 
@@ -1776,6 +1803,7 @@ mod tests {
             windows: vec![locked, capped],
             width_offset: 0.0,
             height_weights: vec![1.0, 1.0],
+            last_focused: Some(locked),
         }];
         state.selected = Some(locked);
 
@@ -2181,6 +2209,30 @@ mod tests {
             w1_x_after_left,
             w2_x_after_right
         );
+    }
+
+    #[test]
+    fn niri_horizontal_focus_returns_to_column_last_focused_window() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        let w3 = wid(1, 3);
+
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+        assert!(system.select_window(layout, w2));
+        system.join_selection_with_direction(layout, Direction::Left);
+
+        let (right_focus, _) = system.move_focus(layout, Direction::Right);
+        assert_eq!(right_focus, Some(w3));
+
+        let (left_focus, _) = system.move_focus(layout, Direction::Left);
+        assert_eq!(left_focus, Some(w2));
     }
 
     #[test]
