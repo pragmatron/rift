@@ -94,6 +94,7 @@ impl WindowDiscoveryHandler {
         // pending_refresh: bool,
         app_info: Option<AppInfo>,
     ) {
+        let focus_new_frontmost = app_info.is_none();
         // If app_info wasn't provided, try to look it up from our running app state so
         // we can apply workspace rules immediately on first discovery.
         let app_info =
@@ -103,9 +104,21 @@ impl WindowDiscoveryHandler {
             Self::identify_stale_windows(reactor, pid, &known_visible);
         Self::cleanup_stale_windows(reactor, pid, stale_windows, pending_refresh);
         let new_windows = Self::process_window_list(reactor, new, &app_info);
+        let new_window_ids: Vec<WindowId> = new_windows.iter().map(|(wid, _)| *wid).collect();
         Self::update_window_states(reactor, new_windows, &app_info);
 
         Self::emit_layout_events(reactor, pid, &known_visible, &app_info);
+        if focus_new_frontmost {
+            Self::focus_new_frontmost_window(reactor, &new_window_ids);
+        }
+    }
+
+    fn focus_new_frontmost_window(reactor: &mut Reactor, windows: &[WindowId]) {
+        for wid in windows.iter().rev().copied() {
+            if reactor.assume_focus_for_new_frontmost_window(wid) {
+                break;
+            }
+        }
     }
 
     fn sync_window_server_id_mapping(

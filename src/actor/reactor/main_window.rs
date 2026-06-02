@@ -15,6 +15,20 @@ struct AppState {
 }
 
 impl MainWindowTracker {
+    pub fn assume_main_window_for_frontmost_app(&mut self, wid: WindowId) -> bool {
+        if self.global_frontmost != Some(wid.pid) {
+            return false;
+        }
+        let Some(app) = self.apps.get_mut(&wid.pid) else {
+            return false;
+        };
+        if !app.is_frontmost {
+            return false;
+        }
+        app.main_window = Some(wid);
+        true
+    }
+
     #[must_use]
     pub fn handle_event(&mut self, event: &Event) -> Option<WindowId> {
         let (event_pid, quiet_edge) = match event {

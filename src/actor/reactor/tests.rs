@@ -10,6 +10,98 @@ use crate::sys::app::WindowInfo;
 use crate::sys::window_server::WindowServerId;
 
 #[test]
+fn newly_discovered_window_in_frontmost_app_is_immediately_focused() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let first = WindowId::new(1, 1);
+    let created = WindowId::new(1, 2);
+
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    reactor.handle_events(apps.make_app_with_opts(
+        1,
+        vec![make_window(1)],
+        Some(first),
+        true,
+        true,
+    ));
+    assert_eq!(reactor.main_window(), Some(first));
+
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: 1,
+        new: vec![(created, make_window(2))],
+        known_visible: vec![first, created],
+    });
+
+    assert_eq!(reactor.main_window(), Some(created));
+    let workspaces = reactor.query_workspaces(Some(space));
+    let focused: Vec<_> = workspaces
+        .iter()
+        .flat_map(|ws| ws.windows.iter())
+        .filter(|win| win.is_focused)
+        .map(|win| win.id)
+        .collect();
+    assert_eq!(focused, vec![created]);
+    assert_eq!(
+        reactor.layout_manager.layout_engine.selected_window(space),
+        Some(created)
+    );
+}
+
+#[test]
+fn created_window_in_frontmost_app_is_immediately_focused() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let first = WindowId::new(1, 1);
+    let created = WindowId::new(1, 2);
+
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    reactor.handle_events(apps.make_app_with_opts(
+        1,
+        vec![make_window(1)],
+        Some(first),
+        true,
+        true,
+    ));
+    assert_eq!(reactor.main_window(), Some(first));
+
+    let created_info = make_window(2);
+    let ws_info = WindowServerInfo {
+        id: created_info.sys_id.unwrap(),
+        pid: 1,
+        layer: 0,
+        frame: created_info.frame,
+        min_frame: CGSize::ZERO,
+        max_frame: CGSize::ZERO,
+    };
+    reactor.handle_event(Event::WindowCreated(
+        created,
+        created_info,
+        Some(ws_info),
+        Some(MouseState::Up),
+    ));
+
+    assert_eq!(reactor.main_window(), Some(created));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.selected_window(space),
+        Some(created)
+    );
+}
+
+#[test]
 fn it_ignores_stale_resize_events() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(

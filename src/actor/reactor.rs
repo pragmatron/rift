@@ -2739,6 +2739,28 @@ impl Reactor {
         }
     }
 
+    pub(crate) fn assume_focus_for_new_frontmost_window(&mut self, wid: WindowId) -> bool {
+        let Some(window) = self.window_manager.windows.get(&wid) else {
+            return false;
+        };
+        if !window.matches_filter(WindowFilter::EffectivelyManageable) {
+            return false;
+        }
+        let Some(space) = self.best_space_for_window_state(window) else {
+            return false;
+        };
+        if !self.is_space_active(space)
+            || !self.layout_manager.layout_engine.is_window_in_active_workspace(space, wid)
+        {
+            return false;
+        }
+        if !self.main_window_tracker.assume_main_window_for_frontmost_app(wid) {
+            return false;
+        }
+        self.send_layout_event(LayoutEvent::WindowFocused(space, wid));
+        true
+    }
+
     #[instrument(skip(self))]
     fn raise_window(&mut self, wid: WindowId, quiet: Quiet, warp: Option<CGPoint>) {
         let mut app_handles = HashMap::default();
