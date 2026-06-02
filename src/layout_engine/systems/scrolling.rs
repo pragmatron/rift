@@ -1338,6 +1338,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
         let Some(state) = self.layout_state_mut(layout) else {
             return false;
         };
@@ -1350,7 +1354,15 @@ impl LayoutSystem for ScrollingLayoutSystem {
             }
         };
         if moved {
-            state.align_scroll_to_selected();
+            if niri_navigation {
+                if matches!(direction, Direction::Left | Direction::Right) {
+                    state.reveal_selected_in_direction(direction);
+                } else {
+                    state.reveal_selected_without_direction();
+                }
+            } else {
+                state.align_scroll_to_selected();
+            }
         }
         moved
     }
@@ -1668,6 +1680,20 @@ mod tests {
         system.add_window_after_selection(layout, w1);
         system.add_window_after_selection(layout, w2);
         (system, layout, w1, w2)
+    }
+
+    fn setup_three_windows(
+        settings: ScrollingLayoutSettings,
+    ) -> (ScrollingLayoutSystem, LayoutId, WindowId, WindowId, WindowId) {
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        let w3 = wid(1, 3);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+        (system, layout, w1, w2, w3)
     }
 
     #[test]
@@ -2410,6 +2436,85 @@ mod tests {
             w1_x_left,
             w1_x_right
         );
+    }
+
+    #[test]
+    fn niri_move_selection_right_reveals_without_left_aligning() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Left;
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        settings.column_width_ratio = 0.45;
+        settings.min_column_width_ratio = 0.2;
+        settings.max_column_width_ratio = 0.9;
+        let (mut system, layout, _, w2, _) = setup_three_windows(settings);
+
+        assert!(system.select_window(layout, w2));
+        let state = system.layouts.get(layout).expect("layout state missing");
+        state.scroll_offset_px.store(0.0f64.to_bits(), Ordering::Relaxed);
+        state.pending_align.store(false, Ordering::Relaxed);
+        state.pending_center_align.store(false, Ordering::Relaxed);
+        state.pending_reveal_direction.store(0, Ordering::Relaxed);
+
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let before = render(&system, layout, screen, &gaps);
+        let before_w2 = frame_for(&before, w2);
+        assert!(before_w2.origin.x > 100.0);
+        assert!(before_w2.origin.x + before_w2.size.width <= screen.size.width + 1.0);
+
+        assert!(system.move_selection(layout, Direction::Right));
+        let after = render(&system, layout, screen, &gaps);
+        let after_w2 = frame_for(&after, w2);
+
+        assert!(
+            after_w2.origin.x > screen.size.width / 2.0,
+            "expected right move to reveal without left-aligning, got x={}",
+            after_w2.origin.x
+        );
+        assert!(after_w2.origin.x + after_w2.size.width <= screen.size.width + 1.0);
+    }
+
+    #[test]
+    fn niri_move_selection_left_keeps_visible_strip_position() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Left;
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        settings.column_width_ratio = 0.45;
+        settings.min_column_width_ratio = 0.2;
+        settings.max_column_width_ratio = 0.9;
+        let (mut system, layout, _, _, w3) = setup_three_windows(settings);
+
+        assert!(system.select_window(layout, w3));
+        let state = system.layouts.get(layout).expect("layout state missing");
+        state.scroll_offset_px.store(350.0f64.to_bits(), Ordering::Relaxed);
+        state.pending_align.store(false, Ordering::Relaxed);
+        state.pending_center_align.store(false, Ordering::Relaxed);
+        state.pending_reveal_direction.store(0, Ordering::Relaxed);
+
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let _ = render(&system, layout, screen, &gaps);
+        let before_offset = scroll_offset(&system, layout);
+
+        assert!(system.move_selection(layout, Direction::Left));
+        let after = render(&system, layout, screen, &gaps);
+        let after_offset = scroll_offset(&system, layout);
+        let after_w3 = frame_for(&after, w3);
+
+        assert!(
+            (before_offset - after_offset).abs() < 1.0,
+            "expected left move to keep visible strip offset, got {} -> {}",
+            before_offset,
+            after_offset
+        );
+        assert!(
+            after_w3.origin.x > 50.0,
+            "expected left move not to left-align the moved column, got x={}",
+            after_w3.origin.x
+        );
+        assert!(after_w3.origin.x + after_w3.size.width <= screen.size.width + 1.0);
     }
 
     #[test]
