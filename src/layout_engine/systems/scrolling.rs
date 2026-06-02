@@ -226,6 +226,19 @@ impl LayoutState {
         self.align_scroll_to_selected();
     }
 
+    fn insert_column_after_selection_or_first(&mut self, wid: WindowId) -> bool {
+        if let Some((col_idx, _)) = self.selected_location() {
+            self.insert_column_after(col_idx, wid);
+            true
+        } else if !self.columns.is_empty() {
+            self.insert_column_after(0, wid);
+            true
+        } else {
+            self.insert_column_at_end(wid);
+            false
+        }
+    }
+
     fn move_window_to_column_end(&mut self, wid: WindowId, target_col: usize) {
         if let Some((col_idx, row_idx)) = self.locate(wid) {
             if col_idx == target_col {
@@ -1015,12 +1028,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let Some(state) = self.layout_state_mut(layout) else {
             return;
         };
-        if let Some((col_idx, _)) = state.selected_location() {
-            state.insert_column_after(col_idx, wid);
-        } else if !state.columns.is_empty() {
-            state.insert_column_after(0, wid);
-        } else {
-            state.insert_column_at_end(wid);
+        let inserted_after_existing = state.insert_column_after_selection_or_first(wid);
+        if niri_navigation && inserted_after_existing {
+            state.reveal_selected_in_direction(Direction::Right);
         }
         if niri_navigation {
             state.reveal_selected_without_direction();
@@ -1087,11 +1097,19 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     current_iter.next();
                 }
                 (Some(des), None) => {
-                    state.insert_column_at_end(**des);
+                    let inserted_after_existing =
+                        state.insert_column_after_selection_or_first(**des);
+                    if niri_navigation && inserted_after_existing {
+                        state.reveal_selected_in_direction(Direction::Right);
+                    }
                     desired_iter.next();
                 }
                 (Some(des), Some(cur)) if des < cur => {
-                    state.insert_column_at_end(**des);
+                    let inserted_after_existing =
+                        state.insert_column_after_selection_or_first(**des);
+                    if niri_navigation && inserted_after_existing {
+                        state.reveal_selected_in_direction(Direction::Right);
+                    }
                     desired_iter.next();
                 }
                 (_, Some(cur)) => {
@@ -1847,6 +1865,29 @@ mod tests {
 
         let (focus, _) = system.move_focus(layout, Direction::Left);
         assert_eq!(focus, Some(w2));
+    }
+
+    #[test]
+    fn set_windows_for_app_inserts_new_columns_after_selection() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        let w3 = wid(1, 3);
+        let w4 = wid(1, 4);
+
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+        assert!(system.select_window(layout, w1));
+
+        system.set_windows_for_app(layout, 1, vec![w1, w2, w3, w4]);
+
+        let state = system.layouts.get(layout).expect("layout state missing");
+        let columns: Vec<Vec<WindowId>> =
+            state.columns.iter().map(|col| col.windows.clone()).collect();
+        assert_eq!(columns, vec![vec![w1], vec![w4], vec![w2], vec![w3]]);
+        assert_eq!(state.selected, Some(w4));
     }
 
     #[test]
