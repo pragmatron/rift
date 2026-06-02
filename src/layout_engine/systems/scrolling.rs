@@ -1026,11 +1026,13 @@ impl LayoutSystem for ScrollingLayoutSystem {
             }
             Direction::Up | Direction::Down => Self::move_focus_vertical(state, direction),
         };
-        if new_sel.is_some() && niri_navigation {
-            if matches!(direction, Direction::Left | Direction::Right) {
-                state.reveal_selected_in_direction(direction);
-            } else {
-                state.reveal_selected_without_direction();
+        if niri_navigation {
+            if new_sel.is_some() {
+                if matches!(direction, Direction::Left | Direction::Right) {
+                    state.reveal_selected_in_direction(direction);
+                } else {
+                    state.reveal_selected_without_direction();
+                }
             }
         } else {
             state.align_scroll_to_selected();
@@ -2067,6 +2069,65 @@ mod tests {
         assert!(
             (before_x - after_x).abs() < 1.0,
             "expected stacked column to remain centered, got x {} -> {}",
+            before_x,
+            after_x
+        );
+    }
+
+    #[test]
+    fn niri_failed_vertical_focus_keeps_strip_offset() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Left;
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        settings.column_width_ratio = 0.3;
+        settings.min_column_width_ratio = 0.2;
+        settings.max_column_width_ratio = 0.9;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        let w3 = wid(1, 3);
+
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+        assert!(system.select_window(layout, w2));
+
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let _ = render(&system, layout, screen, &gaps);
+        let centered_offset = 150.0f64;
+        system
+            .layouts
+            .get(layout)
+            .expect("layout state missing")
+            .scroll_offset_px
+            .store(centered_offset.to_bits(), Ordering::Relaxed);
+        let before = render(&system, layout, screen, &gaps);
+        let before_offset = scroll_offset(&system, layout);
+        let before_x = frame_for(&before, w2).origin.x;
+        assert!((before_offset - centered_offset).abs() < 1.0);
+        assert!(
+            before_x > 1.0,
+            "expected w2 not to be left-aligned before failed focus"
+        );
+
+        let (focus, _) = system.move_focus(layout, Direction::Up);
+        assert_eq!(focus, None);
+        let after = render(&system, layout, screen, &gaps);
+        let after_offset = scroll_offset(&system, layout);
+        let after_x = frame_for(&after, w2).origin.x;
+
+        assert!(
+            (before_offset - after_offset).abs() < 1.0,
+            "expected failed vertical focus to keep offset, got {} -> {}",
+            before_offset,
+            after_offset
+        );
+        assert!(
+            (before_x - after_x).abs() < 1.0,
+            "expected failed vertical focus to keep column x, got {} -> {}",
             before_x,
             after_x
         );
