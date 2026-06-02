@@ -72,8 +72,7 @@ pub enum LayoutCommand {
     },
     /// Snap the strip to the nearest column boundary
     SnapStrip,
-    /// Toggle centering for the selected column without changing alignment settings.
-    /// The center override is cleared when focus moves to a different window.
+    /// Center the selected column once without changing alignment settings.
     CenterSelection,
 
     NextWorkspace(Option<bool>),

@@ -40,6 +40,10 @@ struct LayoutState {
     pending_center_align: AtomicBool,
     #[serde(skip, default = "default_atomic_i8")]
     pending_reveal_direction: AtomicI8,
+    /// Window whose width defines temporary extra scroll bounds after an
+    /// explicit one-shot center command. Niri reveal should not use this to
+    /// re-center on refocus.
+    #[serde(skip)]
     center_override_window: Option<WindowId>,
     #[serde(skip, default = "default_atomic")]
     last_screen_width: AtomicU64,
@@ -99,9 +103,23 @@ impl LayoutState {
         self.selected.or_else(|| self.first_window())
     }
 
+    fn center_override_location(&self) -> Option<(usize, usize)> {
+        self.center_override_window.and_then(|wid| self.locate(wid))
+    }
+
+    fn center_override_contains_selection(&self) -> bool {
+        let Some((center_col_idx, _)) = self.center_override_location() else {
+            return false;
+        };
+        let Some((selected_col_idx, _)) = self.selected_location() else {
+            return false;
+        };
+        center_col_idx == selected_col_idx
+    }
+
     fn align_scroll_to_selected(&mut self) {
-        // Keep centered alignment only while the same selection remains focused.
-        if self.center_override_window.is_some() && self.center_override_window == self.selected {
+        // Keep centered alignment while focus remains in the centered column.
+        if self.center_override_contains_selection() {
             self.pending_center_align.store(true, Ordering::Relaxed);
             self.pending_reveal_direction.store(0, Ordering::Relaxed);
             self.pending_align.store(false, Ordering::Relaxed);
@@ -121,22 +139,13 @@ impl LayoutState {
         if self.selected_location().is_none() {
             return;
         }
-        if self.center_override_window.is_some() && self.center_override_window == self.selected {
-            // Toggle off when already centered on the same selection.
-            self.center_override_window = None;
-            self.pending_center_align.store(false, Ordering::Relaxed);
-            self.pending_align.store(true, Ordering::Relaxed);
-            self.pending_reveal_direction.store(0, Ordering::Relaxed);
-        } else {
-            self.center_override_window = self.selected;
-            self.pending_center_align.store(true, Ordering::Relaxed);
-            self.pending_align.store(false, Ordering::Relaxed);
-            self.pending_reveal_direction.store(0, Ordering::Relaxed);
-        }
+        self.center_override_window = self.selected;
+        self.pending_center_align.store(true, Ordering::Relaxed);
+        self.pending_align.store(false, Ordering::Relaxed);
+        self.pending_reveal_direction.store(0, Ordering::Relaxed);
     }
 
     fn reveal_selected_in_direction(&mut self, direction: Direction) {
-        self.center_override_window = None;
         self.pending_center_align.store(false, Ordering::Relaxed);
         self.pending_align.store(false, Ordering::Relaxed);
         let dir_code = match direction {
@@ -148,7 +157,6 @@ impl LayoutState {
     }
 
     fn reveal_selected_without_direction(&mut self) {
-        self.center_override_window = None;
         self.pending_center_align.store(false, Ordering::Relaxed);
         self.pending_align.store(false, Ordering::Relaxed);
         // 2 = neutral reveal: keep current offset unless selected would be clipped.
@@ -399,7 +407,10 @@ impl ScrollingLayoutSystem {
         let center_offset_delta =
             f64::from_bits(state.last_center_offset_delta_px.load(Ordering::Relaxed));
         let (min_offset, max_offset) = if state.center_override_window.is_some() {
-            (center_offset_delta, base_max_offset + center_offset_delta)
+            (
+                0.0f64.min(center_offset_delta),
+                base_max_offset.max(base_max_offset + center_offset_delta),
+            )
         } else {
             (0.0, base_max_offset)
         };
@@ -455,27 +466,25 @@ impl ScrollingLayoutSystem {
         let base_max_offset = starts.last().copied().unwrap_or(0.0);
         let center_offset_delta =
             f64::from_bits(state.last_center_offset_delta_px.load(Ordering::Relaxed));
-        let (min_offset, max_offset, baseline) = if state.center_override_window.is_some() {
+        let (min_offset, max_offset) = if state.center_override_window.is_some() {
             (
-                center_offset_delta,
-                base_max_offset + center_offset_delta,
-                center_offset_delta,
+                0.0f64.min(center_offset_delta),
+                base_max_offset.max(base_max_offset + center_offset_delta),
             )
         } else {
-            (0.0, base_max_offset, 0.0)
+            (0.0, base_max_offset)
         };
         let current = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
-        let strip_offset = current - baseline;
         let target = starts
             .iter()
             .min_by(|a, b| {
-                let da = (*a - strip_offset).abs();
-                let db = (*b - strip_offset).abs();
+                let da = (*a - current).abs();
+                let db = (*b - current).abs();
                 da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
             })
             .copied()
             .unwrap_or(0.0);
-        let next = (baseline + target).clamp(min_offset, max_offset);
+        let next = target.clamp(min_offset, max_offset);
         state.scroll_offset_px.store(next.to_bits(), Ordering::Relaxed);
     }
 
@@ -708,7 +717,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             self.settings.focus_navigation_style,
             ScrollingFocusNavigationStyle::Niri
         );
-        let anchor_x = if niri_navigation && state.center_override_window.is_none() {
+        let anchor_x = if niri_navigation {
             // Keep strip anchoring stable in niri mode so focus changes do not
             // shift unrelated columns when selected widths differ.
             tiling.origin.x
@@ -754,7 +763,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 }
             }
         };
-        let center_anchor_x = tiling.origin.x + (tiling.size.width - selected_width) / 2.0;
+        let center_override_col_idx = state.center_override_location().map(|(idx, _)| idx);
+        let center_reference_width = center_override_col_idx
+            .and_then(|idx| column_widths.get(idx).copied())
+            .unwrap_or(selected_width);
+        let center_anchor_x = tiling.origin.x + (tiling.size.width - center_reference_width) / 2.0;
         let center_offset_delta = anchor_x - center_anchor_x;
         state
             .last_center_offset_delta_px
@@ -820,8 +833,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
         let current = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
         let base_max_offset = strip_max_offset;
-        let (min_offset, max_offset) = if state.center_override_window.is_some() {
-            (center_offset_delta, base_max_offset + center_offset_delta)
+        let (min_offset, max_offset) = if center_override_col_idx.is_some() {
+            (
+                0.0f64.min(center_offset_delta),
+                base_max_offset.max(base_max_offset + center_offset_delta),
+            )
         } else {
             (0.0, base_max_offset)
         };
@@ -1145,8 +1161,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
             return false;
         };
         if state.locate(wid).is_some() {
-            // refocusing the same centered window should keep the center override
-            if state.selected == Some(wid) && state.center_override_window == Some(wid) {
+            // Refocusing a window that is already selected should not replace a
+            // pending niri reveal or transfer a center override to that window.
+            if niri_navigation && state.selected == Some(wid) {
                 return true;
             }
             state.selected = Some(wid);
@@ -1952,38 +1969,175 @@ mod tests {
     }
 
     #[test]
-    fn center_selection_clears_when_focus_moves() {
+    fn center_selection_does_not_follow_focus_to_visible_column_in_niri_mode() {
         let mut settings = ScrollingLayoutSettings::default();
         settings.alignment = crate::common::config::ScrollingAlignment::Left;
-        let (mut system, layout, _, _) = setup_two_windows(settings);
-        system.center_selected_column(layout);
-        let _ = system.move_focus(layout, Direction::Left);
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        settings.column_width_ratio = 0.3;
+        settings.min_column_width_ratio = 0.2;
+        settings.max_column_width_ratio = 0.9;
+        let (mut system, layout, w1, w2) = setup_two_windows(settings);
 
-        let state = system.layouts.get(layout).expect("layout state missing");
-        assert_eq!(state.center_override_window, None);
-    }
-
-    #[test]
-    fn center_selection_toggles_back_to_layout_alignment() {
-        let mut settings = ScrollingLayoutSettings::default();
-        settings.alignment = crate::common::config::ScrollingAlignment::Left;
-        let (mut system, layout, _, w2) = setup_two_windows(settings);
-
-        // First call centers the current selection.
-        system.center_selected_column(layout);
-        // Second call on the same selection toggles centering off.
+        assert!(system.select_window(layout, w1));
         system.center_selected_column(layout);
 
         let screen = screen(1000.0, 800.0);
         let gaps = GapSettings::default();
-        let frames = render(&system, layout, screen, &gaps);
-        let tiling = compute_tiling_area(screen, &gaps);
-        let selected_frame = frame_for(&frames, w2);
+        let before = render(&system, layout, screen, &gaps);
+        let before_offset = scroll_offset(&system, layout);
+        let w2_before = frame_for(&before, w2);
+        assert!(w2_before.origin.x >= 0.0);
+        assert!(w2_before.origin.x + w2_before.size.width <= screen.size.width);
+
+        let _ = system.move_focus(layout, Direction::Right);
+        assert!(system.select_window(layout, w2));
+        let after = render(&system, layout, screen, &gaps);
+        let after_offset = scroll_offset(&system, layout);
+        let w2_after = frame_for(&after, w2);
+
         assert!(
-            (selected_frame.origin.x - tiling.origin.x.round()).abs() < 1.0,
-            "expected left-aligned x={}, got x={}",
-            tiling.origin.x.round(),
-            selected_frame.origin.x
+            (before_offset - after_offset).abs() < 1.0,
+            "expected fully visible focused column not to move, got offsets {} -> {}",
+            before_offset,
+            after_offset
+        );
+        assert!(
+            (w2_before.origin.x - w2_after.origin.x).abs() < 1.0,
+            "expected visible column x to stay stable, got {} -> {}",
+            w2_before.origin.x,
+            w2_after.origin.x
+        );
+
+        let state = system.layouts.get(layout).expect("layout state missing");
+        assert_eq!(state.selected, Some(w2));
+    }
+
+    #[test]
+    fn center_selection_persists_within_stacked_column_in_niri_mode() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Left;
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        settings.column_width_ratio = 0.45;
+        settings.min_column_width_ratio = 0.2;
+        settings.max_column_width_ratio = 0.9;
+        let (mut system, layout, w1, w2) = setup_two_windows(settings);
+        system.join_selection_with_direction(layout, Direction::Left);
+        system.center_selected_column(layout);
+
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let before = render(&system, layout, screen, &gaps);
+        let before_x = frame_for(&before, w2).origin.x;
+
+        let _ = system.move_focus(layout, Direction::Up);
+        assert!(system.select_window(layout, w1));
+        let after = render(&system, layout, screen, &gaps);
+        let after_x = frame_for(&after, w1).origin.x;
+
+        assert!(
+            (before_x - after_x).abs() < 1.0,
+            "expected stacked column to remain centered, got x {} -> {}",
+            before_x,
+            after_x
+        );
+    }
+
+    #[test]
+    fn center_selection_is_idempotent() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Left;
+        let (mut system, layout, _, w2) = setup_two_windows(settings);
+
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let tiling = compute_tiling_area(screen, &gaps);
+
+        system.center_selected_column(layout);
+        let first_frames = render(&system, layout, screen, &gaps);
+        let first_offset = scroll_offset(&system, layout);
+        let first_frame = frame_for(&first_frames, w2);
+
+        system.center_selected_column(layout);
+        let second_frames = render(&system, layout, screen, &gaps);
+        let second_offset = scroll_offset(&system, layout);
+        let second_frame = frame_for(&second_frames, w2);
+
+        let expected_x = tiling.origin.x + (tiling.size.width - second_frame.size.width) / 2.0;
+        assert!(
+            (second_frame.origin.x - expected_x.round()).abs() < 1.0,
+            "expected centered x={}, got x={}",
+            expected_x.round(),
+            second_frame.origin.x
+        );
+        assert!(
+            (first_offset - second_offset).abs() < 1.0,
+            "expected repeated center_selection to keep offset stable, got {} -> {}",
+            first_offset,
+            second_offset
+        );
+        assert!(
+            (first_frame.origin.x - second_frame.origin.x).abs() < 1.0,
+            "expected repeated center_selection to keep x stable, got {} -> {}",
+            first_frame.origin.x,
+            second_frame.origin.x
+        );
+    }
+
+    #[test]
+    fn niri_refocus_visible_centered_column_does_not_recenter() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Left;
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        settings.column_width_ratio = 0.33;
+        settings.min_column_width_ratio = 0.2;
+        settings.max_column_width_ratio = 0.9;
+        let (mut system, layout, w1, w2) = setup_two_windows(settings);
+
+        assert!(system.select_window(layout, w1));
+        system.resize_selection_by(layout, 0.33);
+        assert!(system.select_window(layout, w2));
+        system.center_selected_column(layout);
+
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let centered_frames = render(&system, layout, screen, &gaps);
+        let centered_w2 = frame_for(&centered_frames, w2);
+
+        let _ = system.move_focus(layout, Direction::Left);
+        let left_frames = render(&system, layout, screen, &gaps);
+        let left_offset = scroll_offset(&system, layout);
+        let w1_left = frame_for(&left_frames, w1);
+        let w2_left = frame_for(&left_frames, w2);
+        assert!(w1_left.origin.x >= -1.0);
+        assert!(w1_left.origin.x + w1_left.size.width <= screen.size.width + 1.0);
+        assert!(w2_left.origin.x >= -1.0);
+        assert!(w2_left.origin.x + w2_left.size.width <= screen.size.width + 1.0);
+
+        let _ = system.move_focus(layout, Direction::Right);
+        let return_frames = render(&system, layout, screen, &gaps);
+        let return_offset = scroll_offset(&system, layout);
+        let w2_return = frame_for(&return_frames, w2);
+
+        assert!(
+            (left_offset - return_offset).abs() < 1.0,
+            "expected visible refocus not to move offset, got {} -> {}",
+            left_offset,
+            return_offset
+        );
+        assert!(
+            (w2_left.origin.x - w2_return.origin.x).abs() < 1.0,
+            "expected visible refocus not to move column x, got {} -> {}",
+            w2_left.origin.x,
+            w2_return.origin.x
+        );
+        assert!(
+            (centered_w2.origin.x - w2_return.origin.x).abs() > 5.0,
+            "expected refocus to avoid re-centering, got centered x {} and return x {}",
+            centered_w2.origin.x,
+            w2_return.origin.x
         );
     }
 

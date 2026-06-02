@@ -225,8 +225,7 @@ enum LayoutCommands {
     ScrollStrip { delta: f64 },
     /// Snap the strip to the nearest column boundary (scrolling layout only)
     SnapStrip,
-    /// Toggle centering of the selected column in scrolling layout.
-    /// If invoked again on the same selection, centering is removed.
+    /// Center the selected column in scrolling layout.
     CenterSelection,
 }
 
