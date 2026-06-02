@@ -2226,16 +2226,9 @@ impl LayoutEngine {
                         None,
                     );
 
-                    let remaining_windows =
-                        self.virtual_workspace_manager.windows_in_active_workspace(op_space);
-                    if let Some(&new_focus) = remaining_windows.first() {
-                        self.broadcast_windows_changed(op_space);
-                        return EventResponse {
-                            focus_window: Some(new_focus),
-                            raise_windows: vec![],
-                            boundary_hit: None,
-                        };
-                    }
+                    let response = self.refocus_workspace(op_space, current_workspace_id);
+                    self.broadcast_windows_changed(op_space);
+                    return response;
                 }
 
                 self.virtual_workspace_manager.set_last_focused_window(
@@ -2835,6 +2828,65 @@ mod tests {
 
         assert!(response.raise_windows.is_empty());
         assert_eq!(response.focus_window, None);
+    }
+
+    #[test]
+    fn move_window_to_workspace_refocuses_source_layout_selection() {
+        let mut layout_settings = LayoutSettings::default();
+        layout_settings.mode = LayoutMode::Scrolling;
+        let mut engine =
+            LayoutEngine::new(&VirtualWorkspaceSettings::default(), &layout_settings, None);
+        let space = SpaceId::new(9);
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)));
+
+        let workspaces = engine.virtual_workspace_manager_mut().list_workspaces(space);
+        let source_workspace = engine
+            .virtual_workspace_manager()
+            .active_workspace(space)
+            .expect("source active workspace");
+        let source_layout = engine
+            .workspace_layouts
+            .active(space, source_workspace)
+            .expect("source active layout");
+        let w1 = WindowId::new(1, 1);
+        let w2 = WindowId::new(1, 2);
+        let w3 = WindowId::new(1, 3);
+        let w4 = WindowId::new(1, 4);
+
+        for wid in [w1, w2, w3, w4] {
+            assert!(
+                engine.virtual_workspace_manager_mut().assign_window_to_workspace(
+                    space,
+                    wid,
+                    source_workspace
+                )
+            );
+            engine
+                .workspace_tree_mut(source_workspace)
+                .add_window_after_selection(source_layout, wid);
+        }
+        assert!(engine.workspace_tree_mut(source_workspace).select_window(source_layout, w2));
+        engine.focused_window = Some(w2);
+        engine
+            .virtual_workspace_manager
+            .set_last_focused_window(space, source_workspace, Some(w2));
+
+        let response =
+            engine.handle_virtual_workspace_command(space, &LayoutCommand::MoveWindowToWorkspace {
+                workspace: 1,
+                window_id: None,
+            });
+
+        assert_eq!(response.focus_window, Some(w3));
+        assert_eq!(engine.focused_window, Some(w3));
+        assert_eq!(
+            engine.virtual_workspace_manager().workspace_for_window(space, w2),
+            Some(workspaces[1].0)
+        );
+        assert_eq!(
+            engine.virtual_workspace_manager().last_focused_window(space, source_workspace),
+            Some(w3)
+        );
     }
 
     #[test]
