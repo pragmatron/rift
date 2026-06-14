@@ -134,6 +134,50 @@ fn it_ignores_stale_resize_events() {
 }
 
 #[test]
+fn rift_frame_notifications_do_not_start_drag_swap_while_mouse_down() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(space)],
+        vec![],
+    ));
+    reactor.handle_events(apps.make_app(1, make_windows(2)));
+    apps.requests();
+
+    let wid = WindowId::new(1, 1);
+    let window = reactor.window_manager.windows.get(&wid).expect("window exists");
+    let wsid = window.info.sys_id.expect("window has server id");
+    let old_frame = window.frame_monotonic;
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    let target = CGRect::new(CGPoint::new(0., 0.), CGSize::new(500., 1000.));
+    reactor.transaction_manager.store_txid(wsid, txid, target);
+
+    let intermediate = CGRect::new(CGPoint::new(25., 0.), CGSize::new(500., 1000.));
+    let changed = super::events::window::WindowEventHandler::handle_window_frame_changed(
+        &mut reactor,
+        wid,
+        intermediate,
+        Some(txid),
+        Requested(false),
+        Some(MouseState::Down),
+    );
+
+    assert!(!changed);
+    assert!(!reactor.is_in_drag());
+    assert_eq!(
+        reactor.window_manager.windows.get(&wid).unwrap().frame_monotonic,
+        old_frame
+    );
+    assert!(reactor.transaction_manager.get_target_frame(wsid).is_some());
+}
+
+#[test]
 fn it_sends_writes_when_stale_read_state_looks_same_as_written_state() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(

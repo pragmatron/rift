@@ -229,16 +229,22 @@ impl WindowEventHandler {
                 .map(|wsid| reactor.transaction_manager.get_last_sent_txid(wsid))
                 .unwrap_or_default();
 
+            let active_drag = reactor.is_in_drag();
             let mut has_pending_request = pending_target.is_some();
             let mut triggered_by_rift =
                 has_pending_request && last_seen.is_some_and(|seen| seen == last_sent_txid);
 
-            if effective_mouse_state == Some(MouseState::Down) && triggered_by_rift {
+            if effective_mouse_state == Some(MouseState::Down) && triggered_by_rift && active_drag {
                 if let Some((wsid, _)) = pending_target {
                     reactor.transaction_manager.clear_target_for_window(wsid);
                 }
                 triggered_by_rift = false;
                 has_pending_request = false;
+            }
+
+            if has_pending_request && !triggered_by_rift && !active_drag {
+                debug!(?last_seen, ?last_sent_txid, "Ignoring frame change while Rift request is pending");
+                return false;
             }
 
             if has_pending_request && last_seen.is_some_and(|seen| seen != last_sent_txid) {
@@ -317,7 +323,7 @@ impl WindowEventHandler {
                 window.frame_monotonic = new_frame;
             }
 
-            let dragging = effective_mouse_state == Some(MouseState::Down) || reactor.is_in_drag();
+            let dragging = active_drag || effective_mouse_state == Some(MouseState::Down);
 
             if !dragging {
                 reactor.drag_manager.skip_layout_for_window = Some(wid);
