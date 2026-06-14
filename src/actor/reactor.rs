@@ -2302,6 +2302,15 @@ impl Reactor {
         response: layout::EventResponse,
         workspace_switch_space: Option<SpaceId>,
     ) {
+        self.handle_layout_response_with_focus_quiet(response, workspace_switch_space, None);
+    }
+
+    fn handle_layout_response_with_focus_quiet(
+        &mut self,
+        response: layout::EventResponse,
+        workspace_switch_space: Option<SpaceId>,
+        focus_quiet_override: Option<Quiet>,
+    ) {
         if self.is_in_drag() {
             self.workspace_switch_manager.mark_workspace_switch_inactive();
             return;
@@ -2365,7 +2374,8 @@ impl Reactor {
 
         let original_focus = focus_window;
 
-        let focus_quiet = workspace_switch_space.map_or(Quiet::No, |_| Quiet::Yes);
+        let focus_quiet =
+            focus_quiet_override.unwrap_or_else(|| workspace_switch_space.map_or(Quiet::No, |_| Quiet::Yes));
 
         let handled_without_raise = if raise_windows.is_empty() && focus_window.is_none() {
             if matches!(

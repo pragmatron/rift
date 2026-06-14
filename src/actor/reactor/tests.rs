@@ -454,6 +454,58 @@ fn handle_layout_response_groups_windows_by_app_and_screen() {
 }
 
 #[test]
+fn move_focus_requests_quiet_focus_acknowledgement() {
+    let mut apps = Apps::new();
+    let mut layout_settings = crate::common::config::LayoutSettings::default();
+    layout_settings.mode = crate::common::config::LayoutMode::Scrolling;
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &layout_settings,
+        None,
+    ));
+    let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(space)],
+        vec![],
+    ));
+    reactor.handle_events(apps.make_app_with_opts(
+        1,
+        make_windows(2),
+        Some(WindowId::new(1, 1)),
+        true,
+        true,
+    ));
+    apps.requests();
+    while raise_manager_rx.try_recv().is_ok() {}
+
+    let selected = reactor
+        .layout_manager
+        .layout_engine
+        .selected_window(space)
+        .expect("selected window");
+    let direction = if selected == WindowId::new(1, 1) {
+        Direction::Right
+    } else {
+        Direction::Left
+    };
+    super::events::command::CommandEventHandler::handle_command_layout(
+        &mut reactor,
+        LayoutCommand::MoveFocus(direction),
+    );
+
+    let msg = raise_manager_rx.try_recv().expect("Should have sent an event").1;
+    match msg {
+        raise_manager::Event::RaiseRequest(RaiseRequest { focus_quiet, .. }) => {
+            assert_eq!(focus_quiet, Quiet::Yes);
+        }
+        _ => panic!("Unexpected event: {msg:?}"),
+    }
+}
+
+#[test]
 fn handle_layout_response_includes_handles_for_raise_and_focus_windows() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(

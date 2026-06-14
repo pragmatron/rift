@@ -72,6 +72,7 @@ impl CommandEventHandler {
             reactor.workspace_switch_manager.mark_workspace_switch_inactive();
         }
 
+        let focus_quiet_override = matches!(cmd, LayoutCommand::MoveFocus(_)).then_some(Quiet::Yes);
         let response = match &cmd {
             LayoutCommand::NextWorkspace(_)
             | LayoutCommand::PrevWorkspace(_)
@@ -114,7 +115,11 @@ impl CommandEventHandler {
             }
         };
 
-        reactor.handle_layout_response(response, workspace_space);
+        reactor.handle_layout_response_with_focus_quiet(
+            response,
+            workspace_space,
+            focus_quiet_override,
+        );
         if requires_workspace_space {
             reactor.update_event_tap_layout_mode();
         }
