@@ -546,7 +546,12 @@ impl WindowDiscoveryHandler {
             ));
         }
 
-        if let Some(main_window) = reactor.main_window()
+        if let Some(target) = reactor.removal_focus_override_target()
+            && let Some(space) = reactor.best_space_for_window_id(target)
+            && reactor.is_space_active(space)
+        {
+            reactor.send_layout_event(LayoutEvent::WindowFocused(space, target));
+        } else if let Some(main_window) = reactor.main_window()
             && let Some(space) = reactor.main_window_space()
             && reactor.is_space_active(space)
         {

@@ -213,13 +213,18 @@ impl LayoutState {
         self.columns[col_idx].remember_focus(selected);
     }
 
-    fn remove_window(&mut self, wid: WindowId) -> Option<WindowId> {
+    fn remove_window(
+        &mut self,
+        wid: WindowId,
+        prefer_replacement_column_last_focused: bool,
+    ) -> Option<WindowId> {
         let (col_idx, row_idx) = self.locate(wid)?;
         let col = &mut self.columns[col_idx];
         col.ensure_height_weights();
         col.windows.remove(row_idx);
         col.height_weights.remove(row_idx);
-        if col.windows.is_empty() {
+        let removed_column = col.windows.is_empty();
+        if removed_column {
             self.columns.remove(col_idx);
         }
         self.fullscreen.remove(&wid);
@@ -227,16 +232,30 @@ impl LayoutState {
 
         if self.selected == Some(wid) {
             self.selected = None;
-            if col_idx < self.columns.len() {
+            if removed_column {
+                if col_idx < self.columns.len() {
+                    let col = &self.columns[col_idx];
+                    self.selected = if prefer_replacement_column_last_focused {
+                        col.last_focused_window()
+                            .or_else(|| col.windows.get(row_idx).copied())
+                            .or_else(|| col.windows.last().copied())
+                    } else {
+                        col.windows.get(row_idx).copied().or_else(|| col.windows.last().copied())
+                    };
+                }
+                if self.selected.is_none() && col_idx > 0 {
+                    let col = &self.columns[col_idx - 1];
+                    self.selected = if prefer_replacement_column_last_focused {
+                        col.last_focused_window().or_else(|| col.windows.last().copied())
+                    } else {
+                        col.windows.last().copied()
+                    };
+                }
+            } else if col_idx < self.columns.len() {
                 let col = &self.columns[col_idx];
                 if let Some(new_sel) = col.windows.get(row_idx).copied() {
                     self.selected = Some(new_sel);
                 } else if let Some(new_sel) = col.windows.last().copied() {
-                    self.selected = Some(new_sel);
-                }
-            }
-            if self.selected.is_none() && col_idx > 0 {
-                if let Some(new_sel) = self.columns[col_idx - 1].windows.last().copied() {
                     self.selected = Some(new_sel);
                 }
             }
@@ -1120,12 +1139,20 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn remove_window(&mut self, wid: WindowId) {
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
         for state in self.layouts.values_mut() {
-            let _ = state.remove_window(wid);
+            let _ = state.remove_window(wid, niri_navigation);
         }
     }
 
     fn remove_windows_for_app(&mut self, pid: pid_t) {
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
         for state in self.layouts.values_mut() {
             let windows: Vec<_> = state
                 .columns
@@ -1134,7 +1161,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 .filter(|w| w.pid == pid)
                 .collect();
             for wid in windows {
-                let _ = state.remove_window(wid);
+                let _ = state.remove_window(wid, niri_navigation);
             }
         }
     }
@@ -1195,7 +1222,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     desired_iter.next();
                 }
                 (_, Some(cur)) => {
-                    let _ = state.remove_window(**cur);
+                    let _ = state.remove_window(**cur, niri_navigation);
                     current_iter.next();
                 }
                 (None, None) => break,
@@ -1415,7 +1442,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             return;
         };
         if let Some(state) = self.layout_state_mut(from_layout) {
-            state.remove_window(selected);
+            state.remove_window(selected, niri_navigation);
             if niri_navigation {
                 state.reveal_selected_without_direction();
             } else {
@@ -2572,6 +2599,48 @@ mod tests {
             after_w3.origin.x
         );
         assert!(after_w3.origin.x + after_w3.size.width <= screen.size.width + 1.0);
+    }
+
+    #[test]
+    fn niri_remove_selected_column_focuses_replacement_column_last_focused_window() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        let (mut system, layout, w1, w2, w3) = setup_three_windows(settings);
+
+        assert!(system.select_window(layout, w3));
+        system.join_selection_with_direction(layout, Direction::Left);
+        assert!(system.select_window(layout, w2));
+        assert!(system.select_window(layout, w3));
+        assert!(system.select_window(layout, w1));
+
+        system.remove_window(w1);
+
+        let state = system.layouts.get(layout).expect("layout state missing");
+        assert_eq!(state.columns.len(), 1);
+        assert_eq!(state.columns[0].windows, vec![w2, w3]);
+        assert_eq!(state.selected, Some(w3));
+    }
+
+    #[test]
+    fn niri_remove_selected_row_focuses_window_taking_its_place() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        let (mut system, layout, w1, w2, w3) = setup_three_windows(settings);
+
+        assert!(system.select_window(layout, w2));
+        system.join_selection_with_direction(layout, Direction::Left);
+        assert!(system.select_window(layout, w3));
+        system.join_selection_with_direction(layout, Direction::Left);
+        assert!(system.select_window(layout, w2));
+
+        system.remove_window(w2);
+
+        let state = system.layouts.get(layout).expect("layout state missing");
+        assert_eq!(state.columns.len(), 1);
+        assert_eq!(state.columns[0].windows, vec![w1, w3]);
+        assert_eq!(state.selected, Some(w3));
     }
 
     #[test]

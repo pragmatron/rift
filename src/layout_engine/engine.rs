@@ -891,7 +891,12 @@ impl LayoutEngine {
         }
     }
 
-    fn remove_window_internal(&mut self, wid: WindowId, preserve_floating: bool) {
+    fn remove_window_internal(
+        &mut self,
+        wid: WindowId,
+        preserve_floating: bool,
+    ) -> Option<WindowId> {
+        let was_focused = self.focused_window == Some(wid);
         let removal = self.remove_window_layout_membership(wid);
 
         if preserve_floating {
@@ -910,12 +915,46 @@ impl LayoutEngine {
         }
         self.window_layout_constraints.remove(&wid);
 
+        let focus_after_removal = if was_focused {
+            self.focus_target_after_window_removal(&removal)
+        } else {
+            None
+        };
+
+        if let Some((space, ws_id, focus_window)) = focus_after_removal {
+            self.focused_window = Some(focus_window);
+            self.virtual_workspace_manager.set_last_focused_window(
+                space,
+                ws_id,
+                Some(focus_window),
+            );
+        }
+
         if let Some(space) = removal.active_space {
             self.broadcast_windows_changed(space);
         }
 
         if removal.changes_layout() {
             self.rebalance_all_layouts();
+        }
+
+        focus_after_removal.map(|(_, _, focus_window)| focus_window)
+    }
+
+    fn focus_target_after_window_removal(
+        &self,
+        removal: &WindowRemovalImpact,
+    ) -> Option<(SpaceId, VirtualWorkspaceId, WindowId)> {
+        let space = removal.active_space?;
+        let (ws_id, layout) = self.workspace_and_layout(space)?;
+        let tree = self.workspace_tree(ws_id);
+        let focus_window = tree
+            .selected_window(layout)
+            .or_else(|| tree.visible_windows_in_layout(layout).first().copied())?;
+        if self.is_window_in_active_workspace(space, focus_window) {
+            Some((space, ws_id, focus_window))
+        } else {
+            None
         }
     }
 
@@ -1324,10 +1363,22 @@ impl LayoutEngine {
                 }
             }
             LayoutEvent::WindowRemoved(wid) => {
-                self.remove_window_internal(wid, false);
+                if let Some(focus_window) = self.remove_window_internal(wid, false) {
+                    return EventResponse {
+                        focus_window: Some(focus_window),
+                        raise_windows: vec![],
+                        boundary_hit: None,
+                    };
+                }
             }
             LayoutEvent::WindowRemovedPreserveFloating(wid) => {
-                self.remove_window_internal(wid, true);
+                if let Some(focus_window) = self.remove_window_internal(wid, true) {
+                    return EventResponse {
+                        focus_window: Some(focus_window),
+                        raise_windows: vec![],
+                        boundary_hit: None,
+                    };
+                }
             }
             LayoutEvent::WindowFocused(space, wid) => {
                 if self.floating.is_floating(wid) {
@@ -2894,6 +2945,53 @@ mod tests {
         assert_eq!(
             engine.virtual_workspace_manager().last_focused_window(space, source_workspace),
             Some(w3)
+        );
+    }
+
+    #[test]
+    fn removing_focused_window_returns_spatial_replacement_focus() {
+        let mut layout_settings = LayoutSettings::default();
+        layout_settings.mode = LayoutMode::Scrolling;
+        let mut engine =
+            LayoutEngine::new(&VirtualWorkspaceSettings::default(), &layout_settings, None);
+        let space = SpaceId::new(10);
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)));
+
+        let workspace = engine
+            .virtual_workspace_manager()
+            .active_workspace(space)
+            .expect("active workspace");
+        let layout = engine.workspace_layouts.active(space, workspace).expect("active layout");
+        let w1 = WindowId::new(1, 1);
+        let w2 = WindowId::new(1, 2);
+        let w3 = WindowId::new(1, 3);
+
+        for wid in [w1, w2, w3] {
+            assert!(
+                engine
+                    .virtual_workspace_manager_mut()
+                    .assign_window_to_workspace(space, wid, workspace)
+            );
+            engine.workspace_tree_mut(workspace).add_window_after_selection(layout, wid);
+        }
+        assert!(engine.workspace_tree_mut(workspace).select_window(layout, w2));
+        engine.focused_window = Some(w2);
+        engine
+            .virtual_workspace_manager
+            .set_last_focused_window(space, workspace, Some(w2));
+
+        let response = engine.handle_event(LayoutEvent::WindowRemoved(w2));
+
+        assert_eq!(response.focus_window, Some(w3));
+        assert_eq!(engine.focused_window, Some(w3));
+        assert_eq!(engine.selected_window(space), Some(w3));
+        assert_eq!(
+            engine.virtual_workspace_manager().last_focused_window(space, workspace),
+            Some(w3)
+        );
+        assert_eq!(
+            engine.virtual_workspace_manager().workspace_for_window(space, w2),
+            None
         );
     }
 

@@ -120,10 +120,16 @@ impl WorkspaceSwitchManager {
     }
 }
 
+pub struct RemovalFocusOverride {
+    pub target: WindowId,
+    pub expires_at: Instant,
+}
+
 /// Manages refocus and cleanup state
 pub struct RefocusManager {
     pub stale_cleanup_state: super::StaleCleanupState,
     pub refocus_state: super::RefocusState,
+    pub removal_focus_override: Option<RemovalFocusOverride>,
 }
 
 /// Manages communication channels to other actors

@@ -184,6 +184,52 @@ mod tests {
     }
 
     #[test]
+    fn window_destroy_spatial_focus_is_not_overridden_by_app_main_window() {
+        use Event::*;
+        let mut apps = Apps::new();
+        let mut layout_settings = crate::common::config::LayoutSettings::default();
+        layout_settings.mode = crate::common::config::LayoutMode::Scrolling;
+        layout_settings.scrolling.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+            &crate::common::config::VirtualWorkspaceSettings::default(),
+            &layout_settings,
+            None,
+        ));
+        let space = SpaceId::new(1);
+        let screen_frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1920., 1080.));
+        let w1 = WindowId::new(1, 1);
+        let w2 = WindowId::new(1, 2);
+        let w3 = WindowId::new(1, 3);
+
+        reactor.handle_event(screen_params_event(
+            vec![screen_frame],
+            vec![Some(space)],
+            vec![],
+        ));
+        reactor.handle_event(ApplicationGloballyActivated(1));
+        reactor.handle_events(apps.make_app_with_opts(1, make_windows(3), Some(w2), true, true));
+        assert_eq!(
+            reactor.layout_manager.layout_engine.selected_window(space),
+            Some(w2)
+        );
+
+        reactor.handle_event(WindowDestroyed(w2));
+        assert_eq!(
+            reactor.layout_manager.layout_engine.selected_window(space),
+            Some(w3)
+        );
+
+        reactor.handle_event(ApplicationMainWindowChanged(1, Some(w1), Quiet::No));
+        assert_eq!(reactor.main_window(), Some(w1));
+        assert_eq!(
+            reactor.layout_manager.layout_engine.selected_window(space),
+            Some(w3),
+            "app main-window fallback should not override spatial replacement focus"
+        );
+    }
+
+    #[test]
     fn it_does_not_update_layout_for_quiet_raises() {
         use Event::*;
         let mut apps = Apps::new();

@@ -21,7 +21,7 @@ mod testing;
 mod tests;
 
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use animation::Sender as AnimationSender;
 use events::app::AppEventHandler;
@@ -31,7 +31,7 @@ use events::space::SpaceEventHandler;
 use events::system::SystemEventHandler;
 use events::window::WindowEventHandler;
 use main_window::MainWindowTracker;
-use managers::LayoutManager;
+use managers::{LayoutManager, RemovalFocusOverride};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,8 @@ use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, current_cursor_location, space_is_fullscreen,
     wait_for_native_fullscreen_transition, window_level, window_sub_level,
 };
+
+const REMOVAL_FOCUS_OVERRIDE_TTL: Duration = Duration::from_millis(1000);
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
@@ -365,6 +367,7 @@ impl Reactor {
             refocus_manager: managers::RefocusManager {
                 stale_cleanup_state: StaleCleanupState::Enabled,
                 refocus_state: RefocusState::None,
+                removal_focus_override: None,
             },
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
@@ -935,6 +938,7 @@ impl Reactor {
         let should_update_notifications = Self::should_update_notifications(&event);
 
         let raised_window = self.main_window_tracker.handle_event(&event);
+        let raised_window = self.redirect_removal_focus_override(&event, raised_window);
         let mut is_resize = false;
         let mut window_was_destroyed = false;
 
@@ -1893,11 +1897,70 @@ impl Reactor {
     fn send_layout_event(&mut self, event: LayoutEvent) {
         let event_clone = event.clone();
         let response = self.layout_manager.layout_engine.handle_event(event);
+        if matches!(
+            event_clone,
+            LayoutEvent::WindowRemoved(_) | LayoutEvent::WindowRemovedPreserveFloating(_)
+        ) {
+            if let Some(target) = response.focus_window {
+                self.set_removal_focus_override(target);
+            }
+        }
         self.prepare_refocus_after_layout_event(&event_clone);
         self.handle_layout_response(response, None);
         for space in self.space_manager.iter_known_spaces() {
             self.layout_manager.layout_engine.debug_tree_desc(space, "after event", false);
         }
+    }
+
+    fn set_removal_focus_override(&mut self, target: WindowId) {
+        self.refocus_manager.removal_focus_override = Some(RemovalFocusOverride {
+            target,
+            expires_at: Instant::now() + REMOVAL_FOCUS_OVERRIDE_TTL,
+        });
+    }
+
+    fn removal_focus_override_target(&mut self) -> Option<WindowId> {
+        let Some(override_state) = &self.refocus_manager.removal_focus_override else {
+            return None;
+        };
+        let target = override_state.target;
+        if Instant::now() >= override_state.expires_at
+            || !self.window_manager.windows.contains_key(&target)
+        {
+            self.refocus_manager.removal_focus_override = None;
+            return None;
+        }
+        Some(target)
+    }
+
+    fn redirect_removal_focus_override(
+        &mut self,
+        event: &Event,
+        raised_window: Option<WindowId>,
+    ) -> Option<WindowId> {
+        let Some(target) = self.removal_focus_override_target() else {
+            return raised_window;
+        };
+
+        if raised_window == Some(target) {
+            self.refocus_manager.removal_focus_override = None;
+            return raised_window;
+        }
+
+        if let Some(wid) = raised_window
+            && wid.pid == target.pid
+        {
+            return Some(target);
+        }
+
+        if let Event::ApplicationMainWindowChanged(pid, Some(wid), _) = event
+            && *pid == target.pid
+            && *wid != target
+        {
+            return Some(target);
+        }
+
+        raised_window
     }
 
     // Returns true if the window should be raised on mouse over considering
