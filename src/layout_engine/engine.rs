@@ -50,6 +50,7 @@ pub enum LayoutCommand {
     Ascend,
     Descend,
     MoveNode(Direction),
+    MoveColumn(Direction),
 
     JoinWindow(Direction),
     ToggleStack,
@@ -1596,6 +1597,13 @@ impl LayoutEngine {
                                 .assign_window_to_workspace(new_space, wid, new_ws_id);
                         }
                     }
+                }
+                EventResponse::default()
+            }
+            LayoutCommand::MoveColumn(direction) => {
+                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
+                if let LayoutSystemKind::Scrolling(system) = self.workspace_tree_mut(workspace_id) {
+                    system.move_column(layout, direction);
                 }
                 EventResponse::default()
             }

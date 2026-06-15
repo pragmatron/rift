@@ -201,6 +201,8 @@ enum LayoutCommands {
     Descend,
     /// Move the selected node in a direction
     MoveNode { direction: String },
+    /// Move the selected scrolling column in a direction
+    MoveColumn { direction: String },
     /// Join the selected window with neighbor in a direction
     JoinWindow { direction: String },
     /// Toggle stacked state for the selected container
@@ -662,6 +664,9 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<RiftCommand, String> {
         LayoutCommands::Descend => Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::Descend))),
         LayoutCommands::MoveNode { direction } => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::MoveNode(direction.into())),
+        )),
+        LayoutCommands::MoveColumn { direction } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::MoveColumn(direction.into())),
         )),
         LayoutCommands::JoinWindow { direction } => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::JoinWindow(direction.into())),

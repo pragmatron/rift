@@ -525,6 +525,25 @@ impl ScrollingLayoutSystem {
         state.request_center_on_selected();
     }
 
+    pub(crate) fn move_column(&mut self, layout: LayoutId, direction: Direction) -> bool {
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
+        let Some(state) = self.layout_state_mut(layout) else {
+            return false;
+        };
+        let moved = Self::move_selected_column_horizontal(state, direction);
+        if moved {
+            if niri_navigation {
+                state.reveal_selected_in_direction(direction);
+            } else {
+                state.align_scroll_to_selected();
+            }
+        }
+        moved
+    }
+
     fn layout_state(&self, layout: LayoutId) -> Option<&LayoutState> { self.layouts.get(layout) }
 
     fn layout_state_mut(&mut self, layout: LayoutId) -> Option<&mut LayoutState> {
@@ -607,6 +626,14 @@ impl ScrollingLayoutSystem {
             return true;
         }
 
+        Self::move_selected_column_horizontal(state, dir)
+    }
+
+    fn move_selected_column_horizontal(state: &mut LayoutState, dir: Direction) -> bool {
+        let (col_idx, _) = match state.selected_location() {
+            Some(loc) => loc,
+            None => return false,
+        };
         let target_col = match dir {
             Direction::Left => col_idx.checked_sub(1),
             Direction::Right => (col_idx + 1 < state.columns.len()).then_some(col_idx + 1),
@@ -614,8 +641,7 @@ impl ScrollingLayoutSystem {
         };
         let Some(target_col) = target_col else { return false };
         state.columns.swap(col_idx, target_col);
-        let Some(selected) = state.selected else { return false };
-        state.selected = Some(selected);
+        state.remember_selected_column_focus();
         true
     }
 
@@ -2546,6 +2572,40 @@ mod tests {
             after_w3.origin.x
         );
         assert!(after_w3.origin.x + after_w3.size.width <= screen.size.width + 1.0);
+    }
+
+    #[test]
+    fn move_column_right_moves_stacked_column_without_extracting() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        let (mut system, layout, w1, w2, w3) = setup_three_windows(settings);
+        assert!(system.select_window(layout, w2));
+        system.join_selection_with_direction(layout, Direction::Left);
+
+        assert!(system.move_column(layout, Direction::Right));
+        let state = system.layouts.get(layout).expect("layout state missing");
+        assert_eq!(state.columns.len(), 2);
+        assert_eq!(state.columns[0].windows, vec![w3]);
+        assert_eq!(state.columns[1].windows, vec![w1, w2]);
+        assert_eq!(state.selected, Some(w2));
+    }
+
+    #[test]
+    fn move_column_left_swaps_single_window_column_without_merging() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        let (mut system, layout, w1, w2, w3) = setup_three_windows(settings);
+        assert!(system.select_window(layout, w2));
+
+        assert!(system.move_column(layout, Direction::Left));
+        let state = system.layouts.get(layout).expect("layout state missing");
+        assert_eq!(state.columns.len(), 3);
+        assert_eq!(state.columns[0].windows, vec![w2]);
+        assert_eq!(state.columns[1].windows, vec![w1]);
+        assert_eq!(state.columns[2].windows, vec![w3]);
+        assert_eq!(state.selected, Some(w2));
     }
 
     #[test]
