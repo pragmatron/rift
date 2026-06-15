@@ -39,6 +39,8 @@ impl Column {
         }
     }
 
+    fn reset_height_weights(&mut self) { self.height_weights = vec![1.0; self.windows.len()]; }
+
     fn last_focused_window(&self) -> Option<WindowId> {
         self.last_focused.filter(|wid| self.windows.contains(wid))
     }
@@ -285,7 +287,7 @@ impl LayoutState {
             }
             self.columns[col_idx].ensure_height_weights();
             let window = self.columns[col_idx].windows.remove(row_idx);
-            let weight = self.columns[col_idx].height_weights.remove(row_idx);
+            self.columns[col_idx].height_weights.remove(row_idx);
             let removed_column = self.columns[col_idx].windows.is_empty();
             if removed_column {
                 self.columns.remove(col_idx);
@@ -298,9 +300,9 @@ impl LayoutState {
             if target >= self.columns.len() {
                 self.columns.push(Column::new(window));
             } else {
-                self.columns[target].ensure_height_weights();
-                self.columns[target].windows.push(window);
-                self.columns[target].height_weights.push(weight);
+                let target_column = &mut self.columns[target];
+                target_column.windows.push(window);
+                target_column.reset_height_weights();
             }
             self.selected = Some(window);
             self.remember_selected_column_focus();
@@ -2677,6 +2679,72 @@ mod tests {
                 - (f1_before.size.height + f2_before.size.height))
                 .abs()
                 < 2.0
+        );
+    }
+
+    #[test]
+    fn joining_window_resets_heights_after_prior_vertical_resize() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        let (mut system, layout, w1, w2, w3) = setup_three_windows(settings);
+
+        assert!(system.select_window(layout, w2));
+        system.join_selection_with_direction(layout, Direction::Left);
+
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let frames_before = render(&system, layout, screen, &gaps);
+        let f1_before = frame_for(&frames_before, w1);
+        let f2_before = frame_for(&frames_before, w2);
+        assert!((f1_before.size.height - f2_before.size.height).abs() < 1.0);
+
+        assert!(system.select_window(layout, w1));
+        let mut resized = f1_before;
+        resized.size.height = f1_before.size.height + 100.0;
+        system.on_window_resized(layout, w1, f1_before, resized, screen, &gaps);
+
+        let frames_resized = render(&system, layout, screen, &gaps);
+        let f1_resized = frame_for(&frames_resized, w1);
+        let f2_resized = frame_for(&frames_resized, w2);
+        assert!(
+            (f1_resized.size.height - f2_resized.size.height).abs() > 50.0,
+            "expected explicit vertical resize to create non-equal heights, got {} and {}",
+            f1_resized.size.height,
+            f2_resized.size.height
+        );
+
+        assert!(system.select_window(layout, w3));
+        system.join_selection_with_direction(layout, Direction::Left);
+
+        let frames_joined = render(&system, layout, screen, &gaps);
+        let heights = [
+            frame_for(&frames_joined, w1).size.height,
+            frame_for(&frames_joined, w2).size.height,
+            frame_for(&frames_joined, w3).size.height,
+        ];
+        assert!(
+            heights.iter().all(|height| (height - heights[0]).abs() < 1.0),
+            "expected equal default heights after joining a new window, got {:?}",
+            heights
+        );
+
+        assert!(system.select_window(layout, w1));
+        let mut resized_again = frame_for(&frames_joined, w1);
+        resized_again.size.height += 90.0;
+        system.on_window_resized(
+            layout,
+            w1,
+            frame_for(&frames_joined, w1),
+            resized_again,
+            screen,
+            &gaps,
+        );
+        let frames_after_resize = render(&system, layout, screen, &gaps);
+        assert!(
+            frame_for(&frames_after_resize, w1).size.height
+                > frame_for(&frames_after_resize, w2).size.height + 40.0,
+            "expected explicit vertical resize to still work after equalized join"
         );
     }
 
