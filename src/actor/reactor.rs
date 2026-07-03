@@ -1925,7 +1925,7 @@ impl Reactor {
         };
         let target = override_state.target;
         if Instant::now() >= override_state.expires_at
-            || !self.window_manager.windows.contains_key(&target)
+            || !self.window_manager.contains_window(target)
         {
             self.refocus_manager.removal_focus_override = None;
             return None;
@@ -2813,7 +2813,7 @@ impl Reactor {
     }
 
     pub(crate) fn assume_focus_for_new_frontmost_window(&mut self, wid: WindowId) -> bool {
-        let Some(window) = self.window_manager.windows.get(&wid) else {
+        let Some(window) = self.window_manager.window(wid) else {
             return false;
         };
         if !window.matches_filter(WindowFilter::EffectivelyManageable) {

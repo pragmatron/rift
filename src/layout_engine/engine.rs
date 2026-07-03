@@ -2285,7 +2285,7 @@ impl LayoutEngine {
                         None,
                     );
 
-                    let response = self.refocus_workspace(op_space, current_workspace_id);
+                    let response = self.refocus_workspace(op_space, current_workspace_id, None);
                     self.broadcast_windows_changed(op_space);
                     return response;
                 }

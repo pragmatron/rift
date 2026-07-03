@@ -151,7 +151,7 @@ fn rift_frame_notifications_do_not_start_drag_swap_while_mouse_down() {
     apps.requests();
 
     let wid = WindowId::new(1, 1);
-    let window = reactor.window_manager.windows.get(&wid).expect("window exists");
+    let window = reactor.window_manager.window(wid).expect("window exists");
     let wsid = window.info.sys_id.expect("window has server id");
     let old_frame = window.frame_monotonic;
     let txid = reactor.transaction_manager.generate_next_txid(wsid);
@@ -171,7 +171,7 @@ fn rift_frame_notifications_do_not_start_drag_swap_while_mouse_down() {
     assert!(!changed);
     assert!(!reactor.is_in_drag());
     assert_eq!(
-        reactor.window_manager.windows.get(&wid).unwrap().frame_monotonic,
+        reactor.window_manager.window(wid).unwrap().frame_monotonic,
         old_frame
     );
     assert!(reactor.transaction_manager.get_target_frame(wsid).is_some());
